@@ -1,0 +1,13 @@
+{
+  "domain": "copasa",
+  "name": "copasa",
+  "version": "1.0.0", 
+  "documentation": "",
+  "requirements": ["python-barcode==0.14.0",
+                    "pandas","python-barcode[images]"], 
+  "zeroconf": [],
+  "homekit": {},
+  "dependencies": [],
+  "codeowners": []
+}
+
