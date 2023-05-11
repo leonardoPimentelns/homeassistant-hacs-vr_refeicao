@@ -9,12 +9,9 @@ import logging
 from multiprocessing import Event
 import voluptuous
 import json
+import re
 
 
-from barcode.writer import SVGWriter
-import barcode
-EAN = barcode.get_barcode_class('itf')
-barcode.PROVIDED_BARCODES
 import requests
 from homeassistant import const
 from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
@@ -24,17 +21,16 @@ import pandas as pd
 _LOGGER = logging.getLogger(__name__)
 
 
-DEFAULT_NAME = 'Copasa'
+DEFAULT_NAME = 'Vr refeição'
 UPDATE_FREQUENCY = timedelta(minutes=10)
-REGISTRATION ="matricula"
-IDENTIFIER = "identificador"
-CPF_CNPJ= "cpf_cnpj"
+EMAIL ="email"
+PASSWORD = "password"
 
 PLATFORM_SCHEMA = config_validation.PLATFORM_SCHEMA.extend(
     {
-        voluptuous.Required(REGISTRATION): config_validation.string,
-        voluptuous.Required(IDENTIFIER): config_validation.string,
-        voluptuous.Required(CPF_CNPJ): config_validation.string
+        voluptuous.Required(EMAIL): config_validation.string,
+        voluptuous.Required(PASSWORD): config_validation.string,
+
         
        
 
@@ -48,23 +44,22 @@ def setup_platform(
     add_entities,
     discovery_info
 ):
-    """Set up the Copasa sensors."""
+    """Set up the Vr refeição sensors."""
   
-    add_entities([InvoiceSensor(config)])
+    add_entities([VRSensor(config)])
 
 
-class InvoiceSensor(SensorEntity):
-    """Representation of a Copasa sensor."""
+class VRSensor(SensorEntity):
+    """Representation of a VR sensor."""
 
     def __init__(self,config):
         """Initialize a new copasa sensor."""
-        self._attr_name = "copasa"
-        self.live_event = None
-        self.invoice_details = None
-        self.paid_invoices = None
-        self.open_invoices = None
+        self._attr_name = "vr refeicao"
         self.config = config
-        self.costumer_id = None
+        self.transactions = None
+        self.refresh_token = None
+        self.saldo = None
+       
 
        
 
@@ -74,87 +69,135 @@ class InvoiceSensor(SensorEntity):
         """Return icon."""
         return "mdi:bank"
 
-
+           
+    @property
+    def state(self):
+        """Returns the state of the sensor."""
+        return self._state
+    
     @util.Throttle(UPDATE_FREQUENCY)
     def update(self):
         """Fetch new state data for the sensor.
         This is the only method that should fetch new data for Home Assistant.
         """
-        self.costumer_id = get_costumer_id(self.config)
-        self.invoice_details = get_invoice_details(self.config)
-        self.paid_invoices = get_paid_invoices(self.config)
-        self.open_invoices = get_open_invoices(self.config)
-        self.matches = ""
+        self.transactions = transactions()
+        self.refresh_token = get_refresh_token(self.config)
+        self.saldo = get_cards()
+        self._state =  self.saldo
+  
+      
         
-            
-
+ 
 
     @property
     def extra_state_attributes(self):
         """Return device specific state attributes."""
         self._attributes = {
-            "invoice_details": self.invoice_details,
-            "paid_invoices": self.paid_invoices,
-            "open_invoices": self.open_invoices,
+            "transactions": self.transactions,
 
         }
         return  self._attributes
 
   
-def get_costumer_id(config):
-    
-    url = "https://copasaportalprd.azurewebsites.net/Copasa.Portal/Services/MyAccount_ListIdentifiers_GetIdentifiers" 
-    token ="CpfCnpj="+config[CPF_CNPJ]+"&url=https://copasaproddyn365api.azurewebsites.net"
-    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-    resp = requests.post(url,data=token,headers=headers)
-    costumer = json.loads(resp.content)
-    costumer = costumer[0]['contactid']
-    return costumer
+
+
+
    
+def get_clientId():
+    url = "https://portal-trabalhador.vr.com.br/static/js/main.a93bf1b4.chunk.js"
+    resp = requests.get(url)
+    data = resp.text
+    match = re.search(r'clientId:"([^"]+)"', data)
+
+    if match:
+        clientId = match.group(1)
+    return clientId   
+
+def get_code():
+    clientId = get_clientId()
+    url = 'https://api.vr.com.br/oauth/grant-code'
+    headers = {
+        'Content-Type': 'application/json;charset=UTF-8',
+    }
+
+    data = f'{{"client_id":"{clientId}","redirect_uri":"http://localhost/"}}'
+
+    resp = requests.post(url, headers=headers, data=data)
+    data = json.loads(resp.content)
+    code = data['redirect_uri'].replace('http://localhost/?code=','')
+    return code
+
+def get_token():
+    url = "https://api.vr.com.br/oauth/access-token"
+    code = get_code()
+    clientId = self.get_clientId()
+    headers = CaseInsensitiveDict()
+    headers["Authorization"] = "Basic MDhkZGMyNzktYjBhZS0zYWVlLWI2MjgtN2I0ZDVkYzAzZjVjOjM3ZjE0MjRkLTE1MDQtM2QwYi1hZjJiLTc0OTdjYzFkMWU1OQ=="
+    headers["Content-Type"] = "application/json;charset=UTF-8"
+    headers["Accept"] = "application/json, text/plain, */*"
+    headers["Client_id"] = clientId
+    data = f'{{"grant_type":"authorization_code","code":"{code}"}}'
 
 
+    resp = requests.post(url, headers=headers, data=data)
+    token = json.loads(resp.content)
+    return token
 
-def get_invoice_details(config):
-    reference = pd.to_datetime('today')-pd.DateOffset(months=1)
-    reference = reference.strftime('%Y%m')
-    url = "https://copasaproddyn365api.azurewebsites.net/api/Ocorrencia/MyAccount_DuplicateOfAccounts_GetInvoiceDetails" 
-    token= {"Registration":config[REGISTRATION],"Reference":reference,"Company":"Copasa"}
-    
-    resp = requests.post(url, json = token)
-    invoice_details = json.loads(resp.content)
-   
-    return  invoice_details
-    
+def get_refresh_token(config):
+    clientId = get_clientId()
+    token =get_token()
+    url = "https://api.vr.com.br/autenticacao-usuario-rhsso/v3/access-token"
+    headers = CaseInsensitiveDict()
 
-
-
-def get_paid_invoices(config):
-    url = "https://copasaproddyn365api.azurewebsites.net/api/Ocorrencia/MyAccount_DuplicateOfAccounts_GetPaidInvoices"
-    token = {"Identifier":config[IDENTIFIER],"Registration":config[REGISTRATION],"idCpfCnpj":get_costumer_id(config),"Company":"Copasa"}
-    
-    resp = requests.post(url, json = token)
-    invoices = json.loads(resp.content)
-    return  invoices
+    headers["Client_id"] = clientId
+    headers["Access_token"] = token['access_token']
+    # data = '{"email":"leonardoacbp@gmail.com","password":"Lacc0103*"}'
+    data = f'{{"email":"{config['EMAIL']}","password":"{config['PASSWORD']"}}'
+    resp = requests.post(url, headers=headers, data=data)
+    refresh_token = json.loads(resp.content)
+    return refresh_token
 
 
+def get_cards():
 
-def get_open_invoices(config):
-    url = "https://copasaproddyn365api.azurewebsites.net/api/Ocorrencia/MyAccount_DuplicateOfAccounts_GetOpenInvoices"
-    token = {"Identifier":config[IDENTIFIER],"Registration":config[REGISTRATION],"idCpfCnpj":get_costumer_id(config),"Company":"Copasa"}
-    
-    resp = requests.post(url, json = token)
-    invoices = json.loads(resp.content)
-    barcode = invoices['faturas'][0]['numeroCodigoBarras']
-    numeroFatura = invoices['faturas'][0]['numeroFatura']
-    valorUltimaFatura = get_paid_invoices(config)
-    valorUltimaFatura =valorUltimaFatura['contas'][0]['valorTotalFatura'].replace('.','').replace(',','.')
-    valorFatura = invoices['faturas'][0]['valorFatura'].replace('.','').replace(',','.')
-    diferenca = (float(valorFatura) - float(valorUltimaFatura)) /(float(valorUltimaFatura))*100 
-    referencia = invoices['faturas'][0]['referencia']
-    dataVencimento = invoices['faturas'][0]['dataVencimento']
-    dataVencimento = datetime.strptime(dataVencimento, '%Y%m%d').strftime("%d-%m-%Y")
-    referencia = datetime.strptime(referencia, '%Y%m').strftime("%m-%Y")
-    qrcode ="https://wwwapp.copasa.com.br/servicos/WebServiceAPI/Prd/CopasaAtende/api/fatura/exibe/QRCode/"+config[REGISTRATION]+"/"+numeroFatura+"/"+referencia+"/"+dataVencimento+"/"+valorFatura+""
-    invoices = {"valorFatura":valorFatura,"valorUltimaFatura":valorUltimaFatura,"diferenca":round(diferenca,2),"faturas":{"numeroFatura":numeroFatura,'referencia':referencia,"dataVencimento":dataVencimento,"qrcode":qrcode,"barcode":barcode} }
-    return  invoices
-    
+    refresh_token = get_refresh_token()
+    url = "https://pt-bff-painel-portal-trabalhador-prd.vr.com.br/cards/v2/"
+    headers = CaseInsensitiveDict()
+    headers["Authorization"] = refresh_token['access_token']
+    headers["Issuer"] = "VRPAT"
+    resp = requests.get(url, headers=headers)
+    data = json.loads(resp.content)
+
+    saldo = data['result'][0]['saldo']
+    nomeProduto = data['result'][0]['nomeProduto']
+    nomeCartao = data['result'][0]['nomeCartao']
+    ultimaDataCredito = data['result'][0]['ultimaDataCredito']
+    tokenCartao = data['result'][0]['tokenCartao']
+    numeroConta = data['result'][0]['numeroConta']
+    data = {
+            'nomeProduto':nomeProduto,
+            'saldo':saldo,
+            'nomeCartao':nomeCartao,
+            'ultimaDataCredito':ultimaDataCredito,
+            'tokenCartao':tokenCartao,
+            'numeroConta':numeroConta
+          }
+    return data
+def transactions():
+    transactions= []
+    cards = get_cards()
+    refresh_token = get_refresh_token()
+    tokenCartao =  cards['tokenCartao']
+    numeroConta =  cards['numeroConta']
+    url = f'https://pt-bff-extrato-portal-trabalhador-prd.vr.com.br/extract/v2/transactionsbydays/{tokenCartao}/{numeroConta}/15/0/20'
+
+    headers = CaseInsensitiveDict()
+    headers["Authorization"] = refresh_token['access_token']
+    headers["Issuer"] = "VRPAT"
+    headers["Accept"] = "application/json, text/plain, */*"
+    resp = requests.get(url, headers=headers)
+    data = json.loads(resp.content)
+    for item in data['result']:
+        transactions.append(item)
+    return transactions
+
