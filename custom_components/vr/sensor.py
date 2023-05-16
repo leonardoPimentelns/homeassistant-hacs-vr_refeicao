@@ -151,7 +151,6 @@ def get_refresh_token(config):
 
     headers["Client_id"] = clientId
     headers["Access_token"] = token['access_token']
-    # data = '{"email":"leonardoacbp@gmail.com","password":"Lacc0103*"}'
     data = f'{{"email":"{config['EMAIL']}","password":"{config['PASSWORD']"}}'
     resp = requests.post(url, headers=headers, data=data)
     refresh_token = json.loads(resp.content)
